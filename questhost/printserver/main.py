@@ -19,6 +19,7 @@ class PrintParameters(BaseModel):
     template: str
     data: dict
 
+
 logging.basicConfig(level=logging.INFO)
 app = FastAPI()
 app_template_path = Path("~/.questhost/templates").expanduser().resolve()
@@ -47,6 +48,7 @@ def health() -> bool:
     """Check if various hardware/software are properly setup"""
     stdout, stderr = __execute_ptouch()
     # TODO: Need to check more?
+    # TODO: Check wkhtmltopdf?
     if "px" not in stdout or stderr:
         return False
     return True
@@ -73,48 +75,47 @@ async def print_ptouch(print_param: PrintParameters) -> bool:
         html_result = template.render(kwargs)
         with TemporaryFile("wb") as TEMPFILE:
             imgkit.from_string(html_result, output_path=f"{TEMPFILE.name}.png")
-        logging.info(f"Generated ticket to be printed: '{TEMPFILE.name}.png'")
+            logging.info(f"Generated ticket to be printed: '{TEMPFILE.name}.png'")
 
+            is_resized = False
+            for _ in range(10):
+                stdout, stderr = __execute_ptouch()
+                if "timeout" in stdout or "timeout" in stderr:
+                    logging.warning(f"Timed out. STDOUT: {stdout}, STDERR: {stderr}")
+                    time.sleep(0.5)
+                    continue
+                regex = re.search(r"(?P<MAXWIDTH>\d+)px", stdout)
+                if not regex:
+                    logging.warning(f"No width. STDOUT: {stdout}, STDERR: {stderr}")
+                    time.sleep(0.5)
+                    continue
+                max_width = int(regex.group("MAXWIDTH"))
+                logging.info(f"Max width: {max_width}")
+                nonscale = Image.open(f"{TEMPFILE.name}.png")
+                ratio = max_width / nonscale.size[1]
+                nonscale.resize(
+                    (int(nonscale.size[0] * ratio), int(nonscale.size[1] * ratio))
+                ).save(f"{TEMPFILE.name}.png")
+                is_resized = True
+                break
 
-        is_resized = False
-        for _ in range(10):
-            stdout, stderr = __execute_ptouch()
-            if "timeout" in stdout or "timeout" in stderr:
-                logging.warning(f'Timed out. STDOUT: {stdout}, STDERR: {stderr}')
-                time.sleep(0.5)
-                continue
-            regex = re.search(r"(?P<MAXWIDTH>\d+)px", stdout)
-            if not regex:
-                logging.warning(f'No width. STDOUT: {stdout}, STDERR: {stderr}')
-                time.sleep(0.5)
-                continue
-            max_width = int(regex.group("MAXWIDTH"))
-            logging.info(f"Max width: {max_width}")
-            nonscale = Image.open(f"{TEMPFILE.name}.png")
-            ratio = max_width / nonscale.size[1]
-            nonscale.resize(
-                (int(nonscale.size[0] * ratio), int(nonscale.size[1] * ratio))
-            ).save(f"{TEMPFILE.name}.png")
-            is_resized = True
-            break
+            if not is_resized:
+                raise TimeoutError("Cannot resize image")
 
-        if not is_resized:
-            raise TimeoutError("Cannot resize image")
+            is_printed = False
+            for _ in range(10):
+                stdout, stderr = __execute_ptouch(["--image", f"{TEMPFILE.name}.png"])
+                if "timeout" in stdout or "timeout" in stderr:
+                    time.sleep(0.5)
+                    continue
+                is_printed = True
+                break
 
-        is_printed = False
-        for _ in range(10):
-            stdout, stderr = __execute_ptouch(["--image", f"{TEMPFILE.name}.png"])
-            if "timeout" in stdout or "timeout" in stderr:
-                time.sleep(0.5)
-                continue
-            is_printed = True
-            break
+            if not is_resized:
+                raise TimeoutError("Cannot print image")
 
-        if not is_resized:
-            raise TimeoutError("Cannot print image")
-
-        Path(f"{TEMPFILE.name}.png").unlink()
-        return is_printed and is_resized
+            Path(f"{TEMPFILE.name}.png").unlink()
+            return is_printed and is_resized
     except (TemplateNotFound, KeyError) as e:
         raise HTTPException(400, str(e))
     except TimeoutError as e:
