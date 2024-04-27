@@ -29,18 +29,28 @@ loader = FileSystemLoader(app_template_path)
 env = Environment(loader=loader, autoescape=select_autoescape())
 
 
-def __execute_ptouch(args=[]) -> tuple[str, str]:
+def __execute_ptouch(args=[], max_retries=50) -> tuple[str, str]:
     if not args:
         args = ["--info"]
-    return (
-        x.decode().replace("\n", "")
-        for x in Popen(
-            f"ptouch-print {' '.join(args)}",
-            shell=True,
-            stdout=PIPE,
-            stderr=PIPE,
-        ).communicate()
-    )
+    
+    for _ in range(50):
+        result: tuple[str,str]= tuple(
+            x.decode().replace("\n", "")
+            for x in Popen(
+                f"ptouch-print {' '.join(args)}",
+                shell=True,
+                stdout=PIPE,
+                stderr=PIPE,
+            ).communicate()
+        )
+        if any('timeout' in x.lower() for x in result):
+            logging.warning("ptouch-print return `timeout`")
+            for returns in result:
+                logging.info(f"\t* {returns}")
+            time.sleep(0.5)
+        else:
+            return result
+    raise TimeoutError()    
 
 
 @app.get("/health/")
@@ -80,10 +90,6 @@ async def print_ptouch(print_param: PrintParameters) -> bool:
             is_resized = False
             for _ in range(10):
                 stdout, stderr = __execute_ptouch()
-                if "timeout" in stdout or "timeout" in stderr:
-                    logging.warning(f"Timed out. STDOUT: {stdout}, STDERR: {stderr}")
-                    time.sleep(0.5)
-                    continue
                 regex = re.search(r"(?P<MAXWIDTH>\d+)px", stdout)
                 if not regex:
                     logging.warning(f"No width. STDOUT: {stdout}, STDERR: {stderr}")
@@ -105,9 +111,6 @@ async def print_ptouch(print_param: PrintParameters) -> bool:
             is_printed = False
             for _ in range(10):
                 stdout, stderr = __execute_ptouch(["--image", f"{TEMPFILE.name}.png"])
-                if "timeout" in stdout or "timeout" in stderr:
-                    time.sleep(0.5)
-                    continue
                 is_printed = True
                 break
 
